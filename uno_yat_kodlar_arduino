@@ -1,0 +1,942 @@
+#include<TimerOne.h>
+#include<Wire.h>
+#include<Arduino.h>
+#include<avr\wdt.h>
+#include<EEPROM.h>
+
+
+int loop_sayisi=0;
+bool switcher=false;
+enum mesajturu {
+    batarya='?',
+    oradamisin='O',
+    poligon_id_degis='1',
+    manuel='2',
+    senaryo='3',
+    egitim_durumu='4',
+    gunduz='D',
+    gece='N',
+    host_id_degis='6',
+    hassasiyet_degis='7',
+    serbest
+}msj;
+
+enum egitim_situation {
+    duraklat='O',
+    basla='1',
+    bitir='2', //dur anlaminda
+}egitim;
+
+enum altmotor { //alt motor durum
+    yat_pozisyon,
+    kalk_pozisyon,
+    baslangic, 
+}alt_motor;
+
+enum ustmotor {
+    dost_pozisyon,
+    dusman_pozisyon,
+    belirsiz_pozisyon,
+    baslangic_ust,
+}ust_motor;
+
+enum modlar {
+  gece_modu,
+  gunduz_modu
+}gece_gunduz_modlari;
+
+struct mesaj{
+  String poligon;
+  char msj_type;
+  String payload;
+}yenimesaj;
+
+String end_of_message="x\n";
+String inputString = "";         // a string to hold incoming data
+String kayitli_senaryo = "";         // a string to hold incoming data
+boolean stringComplete = false;  // whether the string is complete
+#define buffer_size 200
+#define yat_stop_switch 14  // 23 
+#define kalk_stop_switch 15  // 25 
+#define asagi_motor_hiz 254
+#define yat_pwm_pin 6   //12
+#define kalk_pwm_pin 5   //13
+#define dost_switch 16   //27
+#define dusman_switch 2  //29
+#define belirsiz_switch 17   //28
+#define sag_don_pwm 10  //10
+#define sol_don_pwm 11  //11
+#define yukari_motor_hiz 256
+#define yukari_fren 9 //47
+#define asagi_fren 7 //46
+#define lamba 13  //31
+
+#define host_id_adress 0
+
+int hostnumber = EEPROM.read(0); //eeprom calismasi icin okuma yazma islemlerinden once ve sonra 10ms delay konulursa daha saglikli calisiyormus.....Ersin
+
+String host_number=String(hostnumber)+"=";
+#define poligon_id_adress 1
+
+String self_poligon_no=String(EEPROM.read(poligon_id_adress));
+
+const char dost='t';
+const char dusman='n';
+const char belirsiz='z';
+const char yat='y';
+const char kalk='k';
+const char lam_kapa='c';
+const char lam_ac='o';
+#define durdur 'w'
+
+#define mermi 20000
+int mermi2=10000;
+int16_t AcX,AcY,AcZ,Tmp,GyX,GyY,GyZ;
+
+
+
+
+void myHandler(){
+  //Serial.println("***************** Program Basladi*****************");
+  switcher=false;
+  Timer1.stop();
+}
+
+#define wdp_ms 1152
+
+void setup() {
+
+
+/*
+Watchdog'un register ayarlarıyla interupt süresi asagidaki tablo cikartilip ayarlandi....Ersin
+WDP3   WDP2   WDP1   WDP0   Time-out
+0       0     0      0       16
+0       0     0      1       32
+0       0     1      0       64
+0       0     1      1       125
+0       1     0      0       250
+0       1     0      1       500
+0       1     1      0       1000
+0       1     1      1       2000
+1       0     0      0       4000
+1       0     0      1       8000
+*/
+
+////////////////////////Ersin_WDT_AYARLARI//////////////////////////////////////////
+  cli();      // disable all interrupts
+wdt_reset(); // reset the WDT timer
+/*2000ms lik interupt için register durumlari
+ WDTCSR configuration:
+ WDIE = 1: Interrupt Enable
+ WDE = 1 :Reset Enable
+ WDP3 = 0 :For 2000ms Time-out
+ WDP2 = 1 :For 2000ms Time-out
+ WDP1 = 1 :For 2000ms Time-out
+ WDP0 = 1 :For 2000ms Time-out
+*/
+// Enter Watchdog Configuration mode:
+WDTCSR |= (1<<WDCE) | (1<<WDE);
+// Set Watchdog settings:
+ WDTCSR = (1<<WDIE) | (1<<WDE) | (0<<WDP3) | (1<<WDP2) | (1<<WDP1) | (1<<WDP0);
+sei();
+  
+/////////////////////////////Ersin_WDT_AYARLARI//////////////////////////////////////
+ //////////////////////////////////////////////////////////////////////////////////// 
+  pinMode(lamba, OUTPUT);
+  pinMode(yat_pwm_pin, OUTPUT);
+  pinMode(kalk_pwm_pin, OUTPUT);
+  pinMode(yat_stop_switch, INPUT_PULLUP);
+  pinMode(kalk_stop_switch, INPUT_PULLUP);
+  pinMode(yukari_fren, OUTPUT);
+  pinMode(asagi_fren, OUTPUT);
+  pinMode(dost_switch, INPUT_PULLUP);
+  pinMode(dusman_switch, INPUT_PULLUP);
+  pinMode(belirsiz_switch, INPUT_PULLUP);
+  Timer1.attachInterrupt(myHandler);
+  //Timer1.start(500000); // Calls every 50ms
+  //Serial.begin(9600);
+  Serial.begin(19200); //Serial2.
+  // reserve 200 bytes for the inputString:
+
+//*******************IMU SENSOR **********************
+  Wire.begin();
+  Wire.beginTransmission(104);
+  Wire.write(0x6B);  // PWR_MGMT_1 register
+  Wire.write(0);     // set to zero (wakes up the MPU-6050)
+  Wire.endTransmission(true);
+//****************************************************
+ digitalWrite(asagi_fren, LOW); 
+ digitalWrite(yukari_fren,LOW);
+ digitalWrite(lamba,LOW);
+// Serial.println("***************** Program Basladi*****************");
+wdt_reset();
+Serial.print(host_number+" RESET");//Serial2.
+ while(Serial.available()) //Serial2.
+      Serial.read(); //Serial2.
+motor_kalk();
+motor_dost();
+motor_belirsiz();
+motor_dusman();
+motor_yat();
+motor_kalk();
+}
+
+
+
+void motor_kalk()
+{
+  
+ wdt_reset();
+  int deger;
+  if(alt_motor!=kalk_pozisyon)
+  {
+    digitalWrite(asagi_fren, HIGH);
+    delay(100); 
+    while(1)
+    {
+       if(!digitalRead(kalk_stop_switch))
+     {
+     analogWrite(kalk_pwm_pin, 0);
+     analogWrite(yat_pwm_pin, 0);
+     digitalWrite(asagi_fren, LOW);
+     break;
+     }
+     analogWrite(kalk_pwm_pin, asagi_motor_hiz);
+     analogWrite(yat_pwm_pin, 0);
+
+     deger=digitalRead(kalk_stop_switch);    
+    
+    }
+  }
+  delay(150);
+  alt_motor=kalk_pozisyon;
+}
+
+void motor_yat()
+{
+wdt_reset();
+  int deger;
+  if(alt_motor!=yat_pozisyon)
+  {
+    digitalWrite(asagi_fren, HIGH);
+    delay(100); 
+    while(1)
+    {
+       if(!digitalRead(yat_stop_switch))
+     {
+     analogWrite(kalk_pwm_pin, 0);
+     analogWrite(yat_pwm_pin, 0);
+     digitalWrite(asagi_fren, LOW);
+     break;
+     }
+     analogWrite(kalk_pwm_pin, 0);
+     analogWrite(yat_pwm_pin, asagi_motor_hiz);
+     deger=digitalRead(kalk_stop_switch);    
+    
+    }
+  }
+  delay(150);
+  alt_motor=yat_pozisyon;
+}
+
+void motor_dost()
+{
+wdt_reset();
+  digitalWrite(yukari_fren, HIGH);
+  delay(100);
+  if(ust_motor!=dost_pozisyon)
+  {
+    while(1)
+    {
+      if(!digitalRead(dost_switch))
+      {
+        analogWrite(sag_don_pwm, 0);
+        analogWrite(sol_don_pwm, 0);
+        digitalWrite(yukari_fren, LOW);
+        break;
+      }
+        analogWrite(sol_don_pwm, yukari_motor_hiz);
+        analogWrite(sag_don_pwm, 0);
+     }
+  }
+ delay(150);
+  ust_motor=dost_pozisyon;
+}
+
+void motor_dusman()
+{
+wdt_reset();
+  int deger;
+  digitalWrite(yukari_fren, HIGH);
+  delay(100);
+  if(ust_motor!=dusman_pozisyon)
+  {
+    while(1)
+    {
+      if(!digitalRead(dusman_switch))
+      {
+        analogWrite(sag_don_pwm, 0);
+        analogWrite(sol_don_pwm, 0);
+        digitalWrite(yukari_fren, LOW);
+        break;
+      }
+        analogWrite(sag_don_pwm, yukari_motor_hiz);
+        analogWrite(sol_don_pwm, 0);
+     }
+  }
+  delay(150);
+  ust_motor=dusman_pozisyon;
+}
+
+void motor_belirsiz()
+{
+wdt_reset();
+  int deger;
+  digitalWrite(yukari_fren, HIGH);
+  delay(100);
+  if(ust_motor!=belirsiz_pozisyon)
+  {
+    while(1)
+    {
+      if(!digitalRead(belirsiz_switch))
+      {
+        analogWrite(sag_don_pwm, 0);
+        analogWrite(sol_don_pwm, 0);
+        digitalWrite(yukari_fren, LOW);
+        break;
+      }
+      
+     if(ust_motor==dost_pozisyon) 
+      {  analogWrite(sag_don_pwm, yukari_motor_hiz);
+        analogWrite(sol_don_pwm, 0);}
+     if(ust_motor==dusman_pozisyon)
+      {  analogWrite(sol_don_pwm, yukari_motor_hiz);
+        analogWrite(sag_don_pwm, 0);}
+     }
+     
+  }
+  delay(150);
+  ust_motor=belirsiz_pozisyon;
+}
+
+
+
+void parse_yap(String input)
+{
+wdt_reset();
+    if(input[0]=='O'&&input[1]=='K')
+    {
+      //Serial.println("<<<OK GELDI>>>");
+      while(Serial.available())   //Serial2.
+      Serial.read(); //Serial2.     
+      inputString = "";
+      stringComplete = false;
+      return;
+    }
+
+    if(input[0]=='E'&&input[1]=='R')
+    {
+      //Serial.println("<<<OK GELDI>>>");
+      while(Serial.available())//Serial2.
+      Serial.read(); //Serial2.
+      inputString = "";
+      stringComplete = false;
+      return;
+    }
+    else
+    {
+    //Serial.println(input);
+    //Serial.print("Length    ");
+    //Serial.println(input.length());
+    //inputString = "";
+    stringComplete = false;
+    //Serial2.print("2=<<Mesaj Geldi>>\n");
+
+    String gecici="";
+    gecici.reserve(input.length());
+    gecici=inputString;
+    //Serial.print("<<<<GECICI>>>");
+    //Serial.println(gecici);
+    //Serial.print("<<<<GECICI Uzunluk>>>");
+    //Serial.println(gecici.length());
+    inputString = "";
+
+    //Serial.print("<<<< =  isareti>>>");
+    //Serial.println(gecici.indexOf('='));
+
+    int search=0;
+    int sayi=0;
+
+    while(gecici[search]!='x')
+    {
+      if(gecici[search]=='|')
+      {
+        //Serial.print("<<  |  Bulundu  ");
+        //Serial.println(search);
+        ++sayi;
+      }
+      search++;
+    }
+     //Serial.print(sayi);
+     //Serial.print("<< Ozet ");
+
+    int index[sayi];
+
+    search=0;
+    sayi=0;
+
+    while(gecici[search]!='x')
+    {
+      if(gecici[search]=='|')
+      {
+        index[sayi]=search;
+         ++sayi;
+      }
+      search++;
+    }
+    /*
+    Serial.println("\n<< Ozet ");
+    for(search=0;search<sayi;++search)
+    {
+      Serial.println(index[search]+2);
+    }
+    */
+////////////////////////Parse Islemleri///////////////
+    //string.substring(from)
+    yenimesaj.poligon=gecici.substring(index[0]+1,index[1]);
+    if(yenimesaj.poligon!=self_poligon_no)
+    return;
+    yenimesaj.msj_type=gecici[index[1]+1];
+    yenimesaj.payload=gecici.substring(index[2]+1,gecici.indexOf('x'));
+
+/*
+    Serial.println("<< Poligon Numarasi>>");
+    Serial.println(yenimesaj.poligon);
+    Serial.println("<< Mesaj ID>>");
+    Serial.println(yenimesaj.msj_type);
+    Serial.println("<< Mesaj Payload>>");
+    Serial.println(yenimesaj.payload);
+    Serial.println("******************");
+*/
+//////////////////Cevaplar///////////////////////////
+
+     if(yenimesaj.msj_type=='7')
+    {
+wdt_reset();
+      msj=hassasiyet_degis;
+      mermi2=yenimesaj.payload.toInt();
+      Serial.print(host_number+"|7|1"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+    }
+
+    if(yenimesaj.msj_type=='6')
+    {
+    wdt_reset();
+      msj=host_id_degis;
+      host_number=yenimesaj.payload;
+      hostnumber= host_number.toInt();
+      delay(10);
+      EEPROM.write(host_id_adress,hostnumber);
+      delay(10);
+     // Serial.println(hostnumber);
+      Serial.print(host_number+"|6|1"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+    }
+
+
+    if(yenimesaj.msj_type=='1')
+    {
+    wdt_reset();  
+      msj=poligon_id_degis;
+      int selfpoligonno=yenimesaj.payload.toInt();
+      delay(10);
+      EEPROM.write(poligon_id_adress,selfpoligonno);
+      delay(10);
+      self_poligon_no = (String)selfpoligonno;
+      Serial.print(host_number+"|1|1"+end_of_message);//Serial2.
+   wdt_reset();
+      msj=serbest;
+      return;
+    }
+
+    if(yenimesaj.msj_type=='?')
+    {
+    wdt_reset();
+      msj=batarya;
+      Serial.print(host_number+"Pil Durumum  98798789654 tane kalem pil kaldi"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+    }
+
+      if(yenimesaj.msj_type=='O')
+    {
+   wdt_reset();
+      msj=oradamisin;
+  wdt_reset();
+      Serial.print(host_number+"1"+end_of_message);//Serial2.
+      msj=serbest;
+  wdt_reset();
+      return;
+    }
+
+      if(yenimesaj.msj_type=='3')
+    {
+   wdt_reset();
+      msj=senaryo;
+      kayitli_senaryo=yenimesaj.payload;
+      loop_sayisi=kayitli_senaryo.substring(0,kayitli_senaryo.indexOf('|')).toInt();
+      Serial.print(host_number+"|3|1"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+    }
+
+      if(yenimesaj.msj_type=='4')
+    {
+      msj=egitim_durumu;
+
+      if(yenimesaj.payload[0]=='0')
+      {
+        egitim=duraklat;
+        msj=serbest;
+      return;
+      }
+
+      if(yenimesaj.payload[0]=='1')
+      {
+        egitim=basla;
+        msj=serbest;
+      return;
+      }
+
+      if(yenimesaj.payload[0]=='2')
+      {
+        egitim=bitir;
+        msj=serbest;
+        loop_sayisi=0;
+      return;
+      }
+
+    }
+      if(yenimesaj.msj_type=='D')
+      {
+      gece_gunduz_modlari=gunduz_modu;
+      Serial.print(host_number+"|D|1"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+      }
+
+      if(yenimesaj.msj_type=='N')
+      {
+      gece_gunduz_modlari=gece_modu;
+      Serial.print(host_number+"|N|1"+end_of_message);//Serial2.
+      msj=serbest;
+      return;
+      }
+
+
+
+    
+    }
+}
+
+int mermi_oku()
+{
+   wdt_reset();
+      Wire.beginTransmission(104);
+      Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
+      Wire.endTransmission(false);
+      Wire.requestFrom(104,14,true);  // request a total of 14 registers
+
+      AcX=Wire.read()<<8|Wire.read();  // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)
+      AcY=Wire.read()<<8|Wire.read();  // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
+      AcZ=Wire.read()<<8|Wire.read();  // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
+    //  Serial.print("AcY = "); Serial.println(AcY);
+    //  Serial.print("AcZ = "); Serial.println(AcZ);
+      if((abs(AcZ)>=mermi2) && (alt_motor == kalk_pozisyon)  && ust_motor==dost_pozisyon)
+      {
+          Serial.print(host_number+"a"+end_of_message);//Serial2.
+          while (Serial.available()) //Serial2.
+          {
+            char inChar = (char)Serial.read();//Serial2.
+            if (inChar == durdur)
+            {
+              char inChar = (char)Serial.read();//Serial2.
+              if (inChar == self_poligon_no[0])
+              {
+             // Serial.println(host_number+"DURDUMMMM"+end_of_message);
+              egitim=bitir;
+              }
+               while (Serial.available()) //Serial2.
+                {
+                 inChar = (char)Serial.read();//Serial2.
+                }
+            }
+        wdt_reset();
+          }
+          return 1;
+      }
+      if((abs(AcZ)>=mermi2) && (alt_motor == kalk_pozisyon)  && ust_motor==dusman_pozisyon)
+      {
+          Serial.print(host_number+"b"+end_of_message);//Serial2.
+          while (Serial.available()) //Serial2.
+          {
+            char inChar = (char)Serial.read();//Serial2.
+            if (inChar == durdur)
+            {
+              char inChar = (char)Serial.read();//Serial2.
+              if (inChar == self_poligon_no[0])
+              {
+            //  Serial.println(host_number+"DURDUMMMM"+end_of_message);
+              egitim=bitir;
+              }
+               while (Serial.available())//Serial2.
+                {
+                 inChar = (char)Serial.read();//Serial2.
+                }
+            }
+       wdt_reset();
+          }
+         return 1;
+      }
+      
+      if((abs(AcY)>=mermi) && (alt_motor == kalk_pozisyon)  && ust_motor==belirsiz_pozisyon)
+      {
+          Serial.print(host_number+"c"+end_of_message);//Serial2.
+          while (Serial.available()) //Serial2.
+          {
+            char inChar = (char)Serial.read();//Serial2.
+            if (inChar == durdur)
+            {
+              char inChar = (char)Serial.read();//Serial2.
+              if (inChar == self_poligon_no[0])
+              {
+            //  Serial.println(host_number+"DURDUMMMM"+end_of_message);
+              egitim=bitir;
+              }
+             while (Serial.available())//Serial2.
+              {
+               inChar = (char)Serial.read();//Serial2.
+              }
+            }
+        wdt_reset();
+          }
+          return 1;
+      }
+     
+      
+      else if((abs(AcY)<=mermi) && (alt_motor == kalk_pozisyon) )
+      {
+        while (Serial.available())//Serial2.
+          {
+            char inChar = (char)Serial.read();//Serial2.
+            if (inChar == durdur)
+            {
+             char inChar = (char)Serial.read();//Serial2.
+              if (inChar == self_poligon_no[0])
+              {
+            //  Serial.println(host_number+"DURDUMMMM"+end_of_message);
+              egitim=bitir;
+              }
+               while (Serial.available())//Serial2.
+                {
+                 inChar = (char)Serial.read();//Serial2.
+                }
+            }
+      wdt_reset();
+          }
+           return 0;
+      }
+}
+
+void yat_aksiyon(void)
+{
+   motor_yat();
+   int deger;
+    while(switcher==true)
+  {
+  wdt_reset();
+    deger =mermi_oku();
+  }
+
+//  Serial2.print(host_number+"yattim"+end_of_message);
+//    while (Serial2.available()) 
+//  {
+//    char inChar = (char)Serial2.read();
+//  }
+}
+
+void kalk_aksiyon(void)
+{
+motor_kalk();
+
+  delay(50);
+  int deger;
+  while(switcher==true)
+    {
+  wdt_reset();
+      deger =mermi_oku();
+      if(deger)
+      {
+       // Serial.print(" BOOOOOM"); 
+        break;
+      }
+    }
+  if(deger==0 && ust_motor==dost_pozisyon)
+   {
+     Serial.print(host_number+"d"+end_of_message);//Serial2.
+     while (Serial.available()) //Serial2.
+     {
+       char inChar = (char)Serial.read();//Serial2.
+     }
+   }
+  if(deger==0 && ust_motor==dusman_pozisyon)
+   {
+     Serial.print(host_number+"e"+end_of_message);//Serial2.
+     while (Serial.available()) //Serial2.
+     {
+       char inChar = (char)Serial.read();//Serial2.
+     }
+   }
+   if(deger==0 && ust_motor==belirsiz_pozisyon)
+   {
+     Serial.print(host_number+"f"+end_of_message);//Serial2.
+     while (Serial.available()) //Serial2.
+     {
+       char inChar = (char)Serial.read();//Serial2.
+     }
+   }
+   
+}
+
+void dost_aksiyon(void)
+{
+  motor_dost();
+  
+  delay(50);
+  int deger;
+  while(switcher==true)
+    {
+    wdt_reset();
+      deger=mermi_oku();
+      if(deger)
+      {
+      //  Serial.print(" BOOOOOM"); 
+        break;
+      }
+    
+    }
+  if(deger==0)
+    {
+      Serial.print(host_number+"d"+end_of_message);//Serial2.
+      while (Serial.available()) //Serial2.
+      {
+        char inChar = (char)Serial.read();//Serial2.
+      }
+    }
+}
+
+void dusman_aksiyon(void)
+{
+  motor_dusman();
+  
+  delay(50);
+  int deger;
+  while(switcher==true)
+    {
+    wdt_reset();
+      deger=mermi_oku();
+      if(deger)
+      {
+       // Serial.print(" BOOOOOM"); 
+        break;
+      }
+    
+    }
+  if(deger==0)
+    {
+      Serial.print(host_number+"e"+end_of_message);//Serial2.
+      while (Serial.available()) //Serial2.
+      {
+        char inChar = (char)Serial.read();//Serial2.
+      }
+    } 
+}
+
+void belirsiz_aksiyon(void)
+{
+ motor_belirsiz();
+  
+  delay(50);
+  int deger;
+  while(switcher==true)
+    {
+    wdt_reset();
+      deger=mermi_oku();
+      if(deger)
+      {
+      //  Serial.print(" BOOOOOM"); 
+        break;
+      }
+    
+    }
+  if(deger==0)
+    {      
+      Serial.print(host_number+"f"+end_of_message);//Serial2.
+      while (Serial.available()) //Serial2.
+      {
+        char inChar = (char)Serial.read();//Serial2.
+      }        
+    } 
+}
+
+void lamba_ac_aksiyon(void)
+{
+  while(switcher==true)
+  {
+  digitalWrite(lamba,HIGH);
+  wdt_reset();
+  }
+}
+
+void lamba_kapa_aksiyon(void)
+{
+  while(switcher==true)
+  {
+  digitalWrite(lamba,LOW);
+wdt_reset();
+  }
+}
+
+void egitim_yap(void)
+{
+  wdt_reset();
+  //  Serial.println("<< Egitim Basladi>>");
+  //  Serial.println("Senaryo Loop Sayisi  ");
+    int index=0;
+    int index2=0;
+    int say=0;
+    String komut="";
+    bool secici=true;
+    for(int a=0;a<loop_sayisi;++a)
+    {
+   wdt_reset();
+      secici=true;
+      while(index<=kayitli_senaryo.length()&&egitim==basla)
+      {
+   wdt_reset();
+      //Serial.println(kayitli_senaryo);
+      index2=kayitli_senaryo.indexOf('|',index+1);
+      komut=kayitli_senaryo.substring(index+1,index2);
+      index=index2;
+      if(say!=0)
+      {
+        if(secici)
+        {
+      //    Serial.print("zaman  ");
+      //    Serial.println(komut.toInt());
+      //    Timer1.start(1000000*komut.toInt());
+        }
+        else
+        {
+        //  Serial.print("pozisyon  ");
+        //  Serial.println(komut[0]);
+
+          switch (komut[0])
+          {
+          case dost:
+          if(gece_gunduz_modlari==gece_modu)
+          digitalWrite(lamba,HIGH);
+          switcher=true;
+          dost_aksiyon();
+          digitalWrite(lamba,LOW);
+          break;
+
+          case dusman:
+          if(gece_gunduz_modlari==gece_modu)
+          digitalWrite(lamba,HIGH);
+          switcher=true;
+          dusman_aksiyon();
+          digitalWrite(lamba,LOW);
+          break;
+
+          case belirsiz:
+          if(gece_gunduz_modlari==gece_modu)
+          digitalWrite(lamba,HIGH);
+          switcher=true;
+          belirsiz_aksiyon();
+          digitalWrite(lamba,LOW);
+          break;
+
+          case yat:
+          switcher=true;
+          yat_aksiyon();
+          break;
+
+          case kalk:
+          if(gece_gunduz_modlari==gece_modu)
+          digitalWrite(lamba,HIGH);
+          switcher=true;
+          kalk_aksiyon();
+          digitalWrite(lamba,LOW);
+          break;
+
+          case lam_kapa:
+          switcher=true;
+          lamba_kapa_aksiyon();
+          break;
+
+          case lam_ac:
+          switcher=true;
+          lamba_ac_aksiyon();
+          break;
+
+          default:
+          break;
+          }
+          
+        }
+      //Serial.print("Say  ");
+      //Serial.println(say);
+      //Serial.println("---");
+      delay(500);
+      secici=!secici;
+      }
+      ++say;
+      }
+   // Serial.println("Tur Bitti");
+    index=0;
+    say=0;
+    String komut="";
+    }
+    egitim=bitir;
+    Serial.print(host_number+"|TO|"+end_of_message);//Serial2.
+}
+
+  void loop()
+  {
+ wdt_reset();
+
+      if(egitim==basla)
+      {
+        egitim_yap();
+      }
+  }
+
+void serialEvent2() {
+  while (Serial.available()) //Serial2.
+  {
+    // get the new byte:
+    char inChar = (char)Serial.read();//Serial2.
+    // add it to the inputString:
+    inputString += inChar;
+    // if the incoming character is a newline, set a flag
+    // so the main loop can do something about it:
+    if (inChar == 'x'||inChar == '\r') 
+    {
+      stringComplete = true;
+      parse_yap(inputString);
+    }
+  }
+}
